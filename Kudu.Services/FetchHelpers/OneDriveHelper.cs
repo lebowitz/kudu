@@ -12,6 +12,7 @@ using Kudu.Contracts.Tracing;
 using Kudu.Core;
 using Kudu.Core.Deployment;
 using Kudu.Core.Infrastructure;
+using Kudu.Core.SourceControl;
 using Kudu.Core.Tracing;
 
 namespace Kudu.Services.FetchHelpers
@@ -28,6 +29,7 @@ namespace Kudu.Services.FetchHelpers
         private const int MaxFilesPerSeconds = 5;
 
         private readonly ITracer _tracer;
+        private readonly IDeploymentStatusManager _status;
         private readonly IDeploymentSettingsManager _settings;
         private readonly IEnvironment _environment;
 
@@ -38,16 +40,19 @@ namespace Kudu.Services.FetchHelpers
         }
 
         public OneDriveHelper(ITracer tracer,
-            IDeploymentSettingsManager settings,
-            IEnvironment environment)
+                              IDeploymentStatusManager status,
+                              IDeploymentSettingsManager settings,
+                              IEnvironment environment)
         {
             _tracer = tracer;
+            _status = status;
             _settings = settings;
             _environment = environment;
         }
 
-        internal async Task Sync(OneDriveInfo info)
+        internal async Task<ChangeSet> Sync(OneDriveInfo info, IRepository repository)
         {
+            ChangeSet changeSet = null;
             string cursor = _settings.GetValue(CursorKey);
             ChangesResult changes = null;
             using (_tracer.Step("Getting delta changes with cursor: {0} ...", cursor))
@@ -59,12 +64,13 @@ namespace Kudu.Services.FetchHelpers
             {
                 _tracer.Trace("No changes need to be applied.");
                 LogMessage(Resources.OneDriveNoChangesFound);
-                return;
+                return changeSet;
             }
 
             string hoststarthtml = Path.Combine(_environment.WebRootPath, Constants.HostingStartHtml);
             FileSystemHelpers.DeleteFileSafe(hoststarthtml);
 
+            using (new Timer(UpdateStatusFile, state: info.TargetChangeset.Id, dueTime: TimeSpan.FromSeconds(5), period: TimeSpan.FromSeconds(5)))
             using (_tracer.Step("Applying {0} changes ...", changes.Count))
             {
                 LogMessage(Resources.OneDriveApplyingChanges, changes.Count);
@@ -82,8 +88,31 @@ namespace Kudu.Services.FetchHelpers
 
                 int totalSuccessCount = deletionResult.SuccessCount + fileChangeResult.SuccessCount + directoryChangeResult.SuccessCount;
                 int totalFailCount = deletionResult.FailureCount + fileChangeResult.FailureCount + directoryChangeResult.FailureCount;
-                _tracer.Trace("{0} successed, {1} failed", totalSuccessCount, totalFailCount);
+                _tracer.Trace("{0} succeeded, {1} failed", totalSuccessCount, totalFailCount);
                 LogMessage(Resources.OneDriveApplyResult, totalSuccessCount, totalFailCount);
+
+                string message;
+                if (totalFailCount > 0)
+                {
+                    message = String.Format(CultureInfo.CurrentCulture,
+                                Resources.OneDrive_SynchronizedWithFailure,
+                                changes.Count - totalFailCount,
+                                changes.Count,
+                                totalFailCount);
+                }
+                else
+                {
+                    message = String.Format(CultureInfo.CurrentCulture,
+                                Resources.OneDrive_Synchronized,
+                                changes.Count);
+                }
+
+                // Commit anyway even partial change
+                // TODO, suwatch: get a proper author and email
+                if (repository.Commit(message, String.Empty, String.Empty))
+                {
+                    changeSet = repository.GetChangeSet("HEAD");
+                }
 
                 if (totalFailCount > 0)
                 {
@@ -94,6 +123,21 @@ namespace Kudu.Services.FetchHelpers
 
             // finally keep a copy of the new cursor
             _settings.SetValue(CursorKey, changes.Cursor);
+
+            return changeSet;
+        }
+
+        private void UpdateStatusFile(object state)
+        {
+            // TODO, suwatch: synchronize this and fill in the blank
+            string changeset = (string)state;
+            IDeploymentStatusFile statusFile = _status.Open(changeset);
+            statusFile.UpdateProgress("TODO: suwatch " + state);
+            //statusFile.UpdateProgress(String.Format(CultureInfo.CurrentCulture,
+            //                            _failedCount == 0 ? Resources.OneDrive_SynchronizingProgress : Resources.OneDrive_SynchronizingProgressWithFailure,
+            //                            ((_successCount + _failedCount) * 100) / _totals,
+            //                            _totals,
+            //                            _failedCount));
         }
 
         private void LogMessage(string format, params object[] args)

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using System.Threading.Tasks;
 using System.Web;
 using Kudu.Contracts.Settings;
@@ -16,10 +17,11 @@ namespace Kudu.Services.ServiceHookHandlers
         private readonly OneDriveHelper _oneDriveHelper;
 
         public OneDriveHandler(ITracer tracer,
-                              IDeploymentSettingsManager settings,
-                              IEnvironment environment)
+                               IDeploymentStatusManager status,
+                               IDeploymentSettingsManager settings,
+                               IEnvironment environment)
         {
-            _oneDriveHelper = new OneDriveHelper(tracer, settings, environment);
+            _oneDriveHelper = new OneDriveHelper(tracer, status, settings, environment);
         }
 
         public DeployAction TryParseDeploymentInfo(HttpRequestBase request, JObject payload, string targetBranch, out DeploymentInfo deploymentInfo)
@@ -31,6 +33,7 @@ namespace Kudu.Services.ServiceHookHandlers
                 return DeployAction.UnknownPayload;
             }
 
+            // TODO, suwatch: either pass author and email with payload or we figure it out from Kudu
             /*
                  Expecting payload to be:
                  {
@@ -45,6 +48,13 @@ namespace Kudu.Services.ServiceHookHandlers
                 AccessToken = payload.Value<string>("AccessToken")
             };
 
+            // TODO, suwatch: proper username and password
+            deploymentInfo.TargetChangeset = DeploymentManager.CreateTemporaryChangeSet(
+                authorName: "Unknown",
+                authorEmail: "Unknown",
+                message: String.Format(CultureInfo.CurrentUICulture, Resources.OneDrive_Synchronizing)
+            );
+
             return DeployAction.ProcessDeployment;
         }
 
@@ -52,7 +62,7 @@ namespace Kudu.Services.ServiceHookHandlers
         {
             var oneDriveInfo = (OneDriveInfo)deploymentInfo;
             _oneDriveHelper.Logger = logger;
-            await _oneDriveHelper.Sync(oneDriveInfo);
+            oneDriveInfo.TargetChangeset =  await _oneDriveHelper.Sync(oneDriveInfo, repository);
         }
     }
 }
